@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // Principal identifies who is acting: a user, a service account, a machine.
@@ -43,6 +44,10 @@ type Decision struct {
 	// (e.g. "redact:ssn", "log:high-risk"). Ignore obligations you don't
 	// understand at your own risk.
 	Obligations []string `json:"obligations,omitempty"`
+	// TTLMillis is the PDP's recommended cache lifetime. When >0 and a Cache
+	// is configured, the SDK caches this decision for that long. Zero means
+	// "fall back to the client-configured default TTL".
+	TTLMillis int64 `json:"ttl_ms,omitempty"`
 }
 
 // ErrDenied is returned by Guard when the PDP denies a request. Callers can
@@ -61,18 +66,78 @@ func (e *DeniedError) Error() string {
 
 func (e *DeniedError) Unwrap() error { return ErrDenied }
 
+// HasObligation reports whether d carries the given obligation string. Case
+// sensitive, exact match.
+func (d Decision) HasObligation(o string) bool {
+	for _, x := range d.Obligations {
+		if x == o {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheTTL returns the effective TTL for a decision, preferring the PDP hint
+// over the client-configured default.
+func (c *Client) cacheTTL(d Decision) time.Duration {
+	if d.TTLMillis > 0 {
+		return time.Duration(d.TTLMillis) * time.Millisecond
+	}
+	return c.cacheDefaultTTL
+}
+
 // Check asks the PDP whether the request is allowed. It returns a Decision
 // and a non-nil error only on transport/protocol failures. On transport
 // failure, the returned Decision honors Client.FailClosed.
+//
+// If a Cache is configured, Check consults it first and skips the HTTP call
+// on a hit. Observers are notified on every call (cache hit or miss).
 func (c *Client) Check(ctx context.Context, req CheckRequest) (Decision, error) {
-	var d Decision
-	if err := c.postJSON(ctx, "/v1/authorize", req, &d); err != nil {
-		if c.FailClosed {
-			return Decision{Allowed: false, Reason: "pdp unavailable (fail-closed)"}, err
+	if c.cache != nil {
+		if dec, ok := c.cache.Get(cacheKey(req)); ok {
+			c.observe(ctx, CheckEvent{
+				Request:  req,
+				Decision: dec,
+				CacheHit: true,
+			})
+			return dec, nil
 		}
-		return Decision{Allowed: true, Reason: "pdp unavailable (fail-open)"}, err
 	}
+
+	start := time.Now()
+	var d Decision
+	attempts, err := c.postJSON(ctx, "/v1/authorize", req, &d)
+	latency := time.Since(start)
+
+	if err != nil {
+		ev := CheckEvent{Request: req, Err: err, Latency: latency, Attempts: attempts}
+		if c.FailClosed {
+			ev.Decision = Decision{Allowed: false, Reason: "pdp unavailable (fail-closed)"}
+			c.observe(ctx, ev)
+			return ev.Decision, err
+		}
+		ev.Decision = Decision{Allowed: true, Reason: "pdp unavailable (fail-open)"}
+		c.observe(ctx, ev)
+		return ev.Decision, err
+	}
+
+	if c.cache != nil {
+		if ttl := c.cacheTTL(d); ttl > 0 {
+			c.cache.Set(cacheKey(req), d, ttl)
+		}
+	}
+	c.observe(ctx, CheckEvent{Request: req, Decision: d, Latency: latency, Attempts: attempts})
 	return d, nil
+}
+
+// observe invokes the configured Observer (if any) without panicking on
+// observer misbehavior.
+func (c *Client) observe(ctx context.Context, ev CheckEvent) {
+	if c.observer == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	c.observer.OnCheck(ctx, ev)
 }
 
 // Guard is the execution-time enforcement primitive: it calls Check and, if

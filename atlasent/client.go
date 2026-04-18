@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"time"
 )
@@ -20,7 +21,7 @@ import (
 const (
 	defaultBaseURL = "https://api.atlasent.io"
 	defaultTimeout = 5 * time.Second
-	userAgent      = "atlasent-sdk-go/0.1"
+	userAgent      = "atlasent-sdk-go/0.2"
 )
 
 // Client talks to the AtlaSent authorization service.
@@ -36,6 +37,12 @@ type Client struct {
 	// so the caller cannot accidentally allow a request. Set false only when
 	// availability matters more than correctness.
 	FailClosed bool
+
+	retry           RetryPolicy
+	cache           Cache
+	cacheDefaultTTL time.Duration
+	observer        Observer
+	rng             *rand.Rand
 }
 
 // Option configures a Client.
@@ -62,6 +69,7 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 		baseURL:    defaultBaseURL,
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		FailClosed: true,
+		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -69,14 +77,23 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) postJSON(ctx context.Context, path string, in, out any) error {
+// httpResult carries the parsed response plus retry metadata.
+type httpResult struct {
+	status     int
+	retryAfter time.Duration
+	body       []byte
+}
+
+// doJSON performs a single HTTP round trip and returns the raw result. It
+// does not retry or decode the body.
+func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, error) {
 	body, err := json.Marshal(in)
 	if err != nil {
-		return fmt.Errorf("atlasent: marshal request: %w", err)
+		return nil, fmt.Errorf("atlasent: marshal request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("atlasent: build request: %w", err)
+		return nil, fmt.Errorf("atlasent: build request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -84,16 +101,64 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("atlasent: transport: %w", err)
+		return nil, fmt.Errorf("atlasent: transport: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
-		return fmt.Errorf("atlasent: %s: %s", resp.Status, bytes.TrimSpace(msg))
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("atlasent: read body: %w", err)
 	}
-	if out == nil {
-		return nil
+	return &httpResult{
+		status:     resp.StatusCode,
+		retryAfter: parseRetryAfter(resp.Header),
+		body:       buf,
+	}, nil
+}
+
+// postJSON runs doJSON with the configured retry policy and decodes a
+// successful 2xx body into out. attempts is the number of HTTP round trips
+// actually performed.
+func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attempts int, err error) {
+	max := c.retry.MaxAttempts
+	if max < 1 {
+		max = 1
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	var lastErr error
+	for attempt := 1; attempt <= max; attempt++ {
+		attempts = attempt
+		res, err := c.doJSON(ctx, path, in)
+		if err != nil {
+			// Transport error: retry if we have attempts left.
+			lastErr = err
+			if attempt == max {
+				return attempts, lastErr
+			}
+			if werr := sleepCtx(ctx, c.retry.backoffFor(attempt, c.rng)); werr != nil {
+				return attempts, werr
+			}
+			continue
+		}
+		if res.status >= 200 && res.status < 300 {
+			if out == nil {
+				return attempts, nil
+			}
+			if err := json.Unmarshal(res.body, out); err != nil {
+				return attempts, fmt.Errorf("atlasent: decode response: %w", err)
+			}
+			return attempts, nil
+		}
+		lastErr = fmt.Errorf("atlasent: %d: %s", res.status, bytes.TrimSpace(res.body))
+		if !retryableStatus(res.status) || attempt == max {
+			return attempts, lastErr
+		}
+		wait := res.retryAfter
+		if wait == 0 {
+			wait = c.retry.backoffFor(attempt, c.rng)
+		}
+		if werr := sleepCtx(ctx, wait); werr != nil {
+			return attempts, werr
+		}
+	}
+	return attempts, lastErr
 }
