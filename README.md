@@ -17,6 +17,7 @@ Optional submodules:
 
 ```sh
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/grpc            # gRPC server interceptors
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/connectrpc      # connectrpc.com/connect interceptor
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/otel            # OpenTelemetry metrics + spans
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/cacheredis      # Redis-backed decision cache
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/gin
@@ -126,6 +127,52 @@ if decision.Allowed {
     if err := reg.Apply(ctx, decision); err != nil { /* don't enforce */ }
 }
 ```
+
+### Circuit breaker
+
+Avoid dog-piling on a known-down PDP:
+
+```go
+client, _ := atlasent.New(apiKey, atlasent.WithCircuitBreaker(atlasent.DefaultBreakerConfig))
+```
+
+After N consecutive failures the breaker opens; `Check` fails fast for
+the cool-down period, then lets one probe through.
+
+### Async observer
+
+Hand events to a background goroutine so slow metric exporters never
+block `Check`:
+
+```go
+async := atlasent.NewAsyncObserver(atlasentotel.NewObserver(meter, tracer), 4096)
+defer async.Close()
+client, _ := atlasent.New(apiKey, atlasent.WithObserver(async))
+```
+
+### Resource from struct tags
+
+Derive `Resource` from domain types so policy call-sites stay short:
+
+```go
+type Invoice struct {
+    ID       string `atlasent:"id"`
+    Customer string `atlasent:"attr,name=customer_id"`
+    Amount   int    `atlasent:"attr"`
+}
+
+res, _ := atlasent.ResourceFrom(inv, "invoice")
+client.Check(ctx, atlasent.CheckRequest{Principal: alice, Action: "invoice.read", Resource: res})
+```
+
+### JWT claims → Principal
+
+```go
+principal, _ := atlasent.PrincipalFromClaims(claims,
+    atlasent.WithGroupsClaim("cognito:groups"))
+```
+
+This does NOT verify signatures — use your JWT library first.
 
 ### DryRun
 
@@ -248,8 +295,24 @@ Same pattern as `HTTPMiddleware`, adapted to each framework:
 // Fiber:  app.Use(atlasentfiber.Middleware(client, resolve))
 ```
 
-chi works with the built-in `HTTPMiddleware` directly (chi middleware is
-`func(http.Handler) http.Handler`).
+chi needs no adapter — the built-in `HTTPMiddleware` has the same shape
+as `chi.Router.Use`:
+
+```go
+r := chi.NewRouter()
+r.Use(jwtAuth) // set Principal on ctx
+r.Use(client.HTTPMiddleware(resolve))
+r.Get("/invoices/{id}", invoiceHandler)
+```
+
+For gRPC-style [Connect](https://connectrpc.com/):
+
+```go
+import atlasentconnect "github.com/atlasent-systems-inc/atlasent-sdk-go/connectrpc"
+
+ic := atlasentconnect.NewInterceptor(client, resolve)
+path, h := billingv1connect.NewInvoicesServiceHandler(svc, connect.WithInterceptors(ic))
+```
 
 ## Layout
 

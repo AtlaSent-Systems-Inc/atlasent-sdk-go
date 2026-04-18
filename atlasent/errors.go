@@ -105,6 +105,13 @@ func kindOf(err error) ErrorKind {
 	return KindUnknown
 }
 
+// errBreakerOpen is the cause wrapped inside breakerError's APIError.
+var errBreakerOpen = errors.New("circuit breaker open")
+
+// IsBreakerOpen reports whether err is the sentinel returned when the
+// circuit breaker blocked a call.
+func IsBreakerOpen(err error) bool { return errors.Is(err, errBreakerOpen) }
+
 // classifyHTTP maps a response status to an ErrorKind.
 func classifyHTTP(status int) ErrorKind {
 	switch {

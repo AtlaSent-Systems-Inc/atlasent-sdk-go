@@ -41,6 +41,7 @@ type Client struct {
 	cache           Cache
 	cacheDefaultTTL time.Duration
 	observer        Observer
+	breaker         *breaker
 }
 
 // Option configures a Client.
@@ -118,6 +119,16 @@ func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, 
 // successful 2xx body into out. attempts is the number of HTTP round trips
 // actually performed.
 func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attempts int, err error) {
+	if c.breaker != nil && !c.breaker.allow() {
+		return 0, breakerError()
+	}
+	if c.breaker != nil {
+		defer func() {
+			if err != nil {
+				c.breaker.onFailure()
+			}
+		}()
+	}
 	max := c.retry.MaxAttempts
 	if max < 1 {
 		max = 1
@@ -138,6 +149,9 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attemp
 			continue
 		}
 		if res.status >= 200 && res.status < 300 {
+			if c.breaker != nil {
+				c.breaker.onSuccess()
+			}
 			if out == nil {
 				return attempts, nil
 			}
