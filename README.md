@@ -1,9 +1,16 @@
 # atlasent-sdk-go
 
-Go SDK for **AtlaSent** execution-time authorization.
+Go SDK for **AtlaSent** execution-time authorization — wire-compatible with the
+TypeScript and Python SDKs.
 
-Ask the AtlaSent Policy Decision Point (PDP) — at the exact call-site of a
-sensitive action — whether a principal may perform an action on a resource.
+Two public methods on a `Client`:
+
+- `client.Evaluate(ctx, EvaluateRequest)` → `POST /v1-evaluate`
+- `client.VerifyPermit(ctx, VerifyPermitRequest)` → `POST /v1-verify-permit`
+
+Plus a higher-level `Check` / `Guard` / `HTTPMiddleware` surface for
+Principal/Resource-shaped call sites (colocating the authorization decision
+with the side-effect it gates).
 
 ## Install
 
@@ -11,28 +18,50 @@ sensitive action — whether a principal may perform an action on a resource.
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/atlasent
 ```
 
-Requires Go 1.21+ (the `Guard` helper uses generics).
+Requires Go 1.22+.
 
-## QuickStart
+## Quickstart — Evaluate
 
 ```go
 client, _ := atlasent.New(os.Getenv("ATLASENT_API_KEY"))
 
+resp, err := client.Evaluate(ctx, atlasent.EvaluateRequest{
+    Agent:  "clinical-data-agent",
+    Action: "modify_patient_record",
+    Context: map[string]any{
+        "user":        "dr_smith",
+        "environment": "production",
+    },
+})
+if err != nil {
+    return err
+}
+if !resp.Permitted {
+    log.Printf("blocked: %s", resp.Reason)
+    return nil
+}
+// use resp.DecisionID to call VerifyPermit if you need a second-factor gate
+```
+
+A clean policy DENY is returned in `resp.Permitted == false` — it is not an
+error. Network, 4xx, 5xx, and malformed-response failures are `*atlasent.Error`.
+
+## Check / Guard (higher-level)
+
+```go
 decision, err := client.Check(ctx, atlasent.CheckRequest{
     Principal: atlasent.Principal{ID: "user_alice", Groups: []string{"finance"}},
     Action:    "invoice.pay",
     Resource:  atlasent.Resource{ID: "inv_42", Type: "invoice"},
     Context:   map[string]any{"ip": "203.0.113.7"},
 })
-if err != nil || !decision.Allowed {
-    return fmt.Errorf("denied: %s", decision.Reason)
-}
 ```
 
-### Guard a sensitive function
+`Check` maps `Principal.ID` → `agent`, embeds `Resource` into the evaluation
+context under `"resource"`, and returns a `Decision` compatible with earlier
+versions of this SDK.
 
-Colocate the authorization decision with the side-effect it gates. `fn` only
-runs when the PDP allows the request; otherwise you get a `*DeniedError`.
+### Guard a sensitive function
 
 ```go
 receipt, err := atlasent.Guard(ctx, client, atlasent.CheckRequest{
@@ -44,38 +73,67 @@ receipt, err := atlasent.Guard(ctx, client, atlasent.CheckRequest{
 })
 ```
 
-### HTTP middleware
+## Typed errors
+
+Every SDK failure returns an `*atlasent.Error` with a stable `Code`
+aligned with the TypeScript and Python SDKs:
 
 ```go
-mux.Handle("/invoices/", client.HTTPMiddleware(func(r *http.Request) (string, atlasent.Resource, map[string]any, error) {
-    id := strings.TrimPrefix(r.URL.Path, "/invoices/")
-    return "invoice.read", atlasent.Resource{ID: id, Type: "invoice"}, nil, nil
-})(invoiceHandler))
+resp, err := client.Evaluate(ctx, req)
+switch {
+case atlasent.IsCode(err, atlasent.ErrRateLimited):
+    time.Sleep(atlasent.AsError(err).RetryAfter)
+    // retry
+case atlasent.IsCode(err, atlasent.ErrInvalidAPIKey):
+    log.Fatalf("bad API key: %s", atlasent.AsError(err).RequestID)
+case err != nil:
+    return err
+}
 ```
 
-Your auth layer must attach the Principal upstream:
+| `Code`             | When                                                 |
+|--------------------|------------------------------------------------------|
+| `invalid_api_key`  | HTTP 401                                             |
+| `forbidden`        | HTTP 403                                             |
+| `rate_limited`     | HTTP 429 — inspect `err.RetryAfter`                  |
+| `bad_request`      | HTTP 4xx (other than 401/403/429)                    |
+| `server_error`     | HTTP 5xx                                             |
+| `timeout`          | context deadline exceeded                            |
+| `network`          | DNS / connection failure, transport threw            |
+| `bad_response`     | non-JSON body or missing required fields             |
 
-```go
-ctx = atlasent.WithPrincipal(r.Context(), atlasent.Principal{ID: claims.Sub})
-```
+Every `*Error` carries `err.RequestID` — the UUID the SDK sent as
+`X-Request-ID`, correlatable in server logs.
 
 ## Fail-closed by default
 
-If the PDP is unreachable, `Check` returns a deny decision *and* a non-nil
-transport error. Opt out with `atlasent.WithFailOpen()` only when availability
+If the PDP is unreachable, `Check` returns a deny `Decision` *and* a non-nil
+`*Error`. Opt out with `atlasent.WithFailOpen()` only when availability
 outranks correctness.
+
+## Version
+
+`atlasent.Version` is injected at build time by the release workflow:
+
+```sh
+go build -ldflags "-X github.com/atlasent-systems-inc/atlasent-sdk-go/atlasent.Version=0.5.0"
+```
+
+Local builds show `Version = "dev"`.
 
 ## Run the example
 
 ```sh
-ATLASENT_API_KEY=sk_live_... go run ./examples/quickstart
+ATLASENT_API_KEY=ask_live_... go run ./examples/quickstart
 ```
 
 Point at a non-production PDP with `ATLASENT_BASE_URL`.
 
-## Layout
+## Related
 
-```
-atlasent/          # SDK package (client, types, Guard, middleware)
-examples/quickstart/   # end-to-end QuickStart
-```
+- **TypeScript SDK:** [`@atlasent/sdk`](https://github.com/AtlaSent-Systems-Inc/atlasent-sdk/tree/main/typescript) — wire-compatible.
+- **Python SDK:** [`atlasent`](https://github.com/AtlaSent-Systems-Inc/atlasent-sdk/tree/main/python) — wire-compatible.
+
+## License
+
+Apache-2.0.

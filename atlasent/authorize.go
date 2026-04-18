@@ -64,15 +64,41 @@ func (e *DeniedError) Unwrap() error { return ErrDenied }
 // Check asks the PDP whether the request is allowed. It returns a Decision
 // and a non-nil error only on transport/protocol failures. On transport
 // failure, the returned Decision honors Client.FailClosed.
+//
+// Check is a higher-level wrapper around Evaluate: Principal.ID maps to
+// agent, Resource is serialized into the context under "resource", and
+// the caller's Context is merged in alongside.
 func (c *Client) Check(ctx context.Context, req CheckRequest) (Decision, error) {
-	var d Decision
-	if err := c.postJSON(ctx, "/v1/authorize", req, &d); err != nil {
+	evalCtx := map[string]any{}
+	for k, v := range req.Context {
+		evalCtx[k] = v
+	}
+	if req.Resource.ID != "" || req.Resource.Type != "" {
+		evalCtx["resource"] = req.Resource
+	}
+	if req.Principal.Groups != nil {
+		evalCtx["principal_groups"] = req.Principal.Groups
+	}
+	if req.Principal.Attributes != nil {
+		evalCtx["principal_attributes"] = req.Principal.Attributes
+	}
+
+	resp, err := c.Evaluate(ctx, EvaluateRequest{
+		Agent:   req.Principal.ID,
+		Action:  req.Action,
+		Context: evalCtx,
+	})
+	if err != nil {
 		if c.FailClosed {
 			return Decision{Allowed: false, Reason: "pdp unavailable (fail-closed)"}, err
 		}
 		return Decision{Allowed: true, Reason: "pdp unavailable (fail-open)"}, err
 	}
-	return d, nil
+	return Decision{
+		Allowed:  resp.Permitted,
+		Reason:   resp.Reason,
+		PolicyID: resp.DecisionID,
+	}, nil
 }
 
 // Guard is the execution-time enforcement primitive: it calls Check and, if

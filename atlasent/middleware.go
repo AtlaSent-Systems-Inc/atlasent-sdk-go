@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // principalCtxKey is the type used to stash a Principal on a request context.
@@ -55,6 +56,13 @@ func (c *Client) HTTPMiddleware(resolve ResourceResolver) func(http.Handler) htt
 				Context:   reqCtx,
 			})
 			if err != nil && c.FailClosed {
+				if IsCode(err, ErrRateLimited) {
+					if e := AsError(err); e != nil && e.RetryAfter > 0 {
+						w.Header().Set("Retry-After", strconv.Itoa(int(e.RetryAfter.Seconds())))
+					}
+					http.Error(w, "authorization service rate-limited", http.StatusServiceUnavailable)
+					return
+				}
 				http.Error(w, "authorization service unavailable", http.StatusServiceUnavailable)
 				return
 			}
