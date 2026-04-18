@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"time"
 )
@@ -42,7 +41,6 @@ type Client struct {
 	cache           Cache
 	cacheDefaultTTL time.Duration
 	observer        Observer
-	rng             *rand.Rand
 }
 
 // Option configures a Client.
@@ -69,7 +67,6 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 		baseURL:    defaultBaseURL,
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		FailClosed: true,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -85,15 +82,16 @@ type httpResult struct {
 }
 
 // doJSON performs a single HTTP round trip and returns the raw result. It
-// does not retry or decode the body.
+// does not retry or decode the body. Transport failures become *APIError
+// with KindTransport.
 func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, error) {
 	body, err := json.Marshal(in)
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: marshal request: %w", err)
+		return nil, &APIError{Kind: KindValidation, Cause: fmt.Errorf("marshal request: %w", err)}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: build request: %w", err)
+		return nil, &APIError{Kind: KindTransport, Cause: fmt.Errorf("build request: %w", err)}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -101,13 +99,13 @@ func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: transport: %w", err)
+		return nil, &APIError{Kind: KindTransport, Cause: err}
 	}
 	defer resp.Body.Close()
 
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: read body: %w", err)
+		return nil, &APIError{Kind: KindTransport, Cause: fmt.Errorf("read body: %w", err)}
 	}
 	return &httpResult{
 		status:     resp.StatusCode,
@@ -134,7 +132,7 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attemp
 			if attempt == max {
 				return attempts, lastErr
 			}
-			if werr := sleepCtx(ctx, c.retry.backoffFor(attempt, c.rng)); werr != nil {
+			if werr := sleepCtx(ctx, c.retry.backoffFor(attempt, jitterRand)); werr != nil {
 				return attempts, werr
 			}
 			continue
@@ -144,17 +142,21 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attemp
 				return attempts, nil
 			}
 			if err := json.Unmarshal(res.body, out); err != nil {
-				return attempts, fmt.Errorf("atlasent: decode response: %w", err)
+				return attempts, &APIError{Kind: KindServer, Status: res.status, Cause: fmt.Errorf("decode response: %w", err)}
 			}
 			return attempts, nil
 		}
-		lastErr = fmt.Errorf("atlasent: %d: %s", res.status, bytes.TrimSpace(res.body))
+		lastErr = &APIError{
+			Kind:   classifyHTTP(res.status),
+			Status: res.status,
+			Body:   string(bytes.TrimSpace(res.body)),
+		}
 		if !retryableStatus(res.status) || attempt == max {
 			return attempts, lastErr
 		}
 		wait := res.retryAfter
 		if wait == 0 {
-			wait = c.retry.backoffFor(attempt, c.rng)
+			wait = c.retry.backoffFor(attempt, jitterRand)
 		}
 		if werr := sleepCtx(ctx, wait); werr != nil {
 			return attempts, werr

@@ -1,0 +1,12 @@
+go 1.24.7
+
+use (
+	.
+	./grpc
+	./otel
+	./cacheredis
+	./middleware/gin
+	./middleware/echo
+	./middleware/fiber
+	./examples/grpc
+)

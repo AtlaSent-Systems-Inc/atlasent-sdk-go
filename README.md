@@ -13,10 +13,21 @@ go get github.com/atlasent-systems-inc/atlasent-sdk-go/atlasent
 
 Requires Go 1.21+ (the `Guard` helper uses generics).
 
-Optional subpackage for gRPC servers:
+Optional submodules:
 
 ```sh
-go get github.com/atlasent-systems-inc/atlasent-sdk-go/grpc
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/grpc            # gRPC server interceptors
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/otel            # OpenTelemetry metrics + spans
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/cacheredis      # Redis-backed decision cache
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/gin
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/echo
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/fiber
+```
+
+For testing consumers of this SDK:
+
+```sh
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/atlasenttest
 ```
 
 ## QuickStart
@@ -79,6 +90,50 @@ s := grpc.NewServer(
 Maps to gRPC status codes:
 `Unauthenticated` (no Principal), `InvalidArgument` (resolver error),
 `PermissionDenied` (PDP denied), `Unavailable` (fail-closed + PDP down).
+
+### Typed errors
+
+Check against ErrorKind for programmatic handling:
+
+```go
+_, err := client.Check(ctx, req)
+switch {
+case atlasent.IsTransport(err):  // network
+case atlasent.IsUnauthorized(err): // bad API key
+case atlasent.IsRateLimit(err):   // 429 — back off
+case atlasent.IsValidation(err):  // missing Action, etc
+}
+```
+
+### Combinators
+
+```go
+i, dec, err := client.CheckAny(ctx, reqs) // first allowed — single round trip
+decs, err  := client.CheckAll(ctx, reqs)  // all-or-DeniedError
+```
+
+### Obligations
+
+Register handlers so unknown obligations become errors, not silent drops:
+
+```go
+reg := atlasent.NewObligationRegistry()
+reg.Register("redact:ssn", func(ctx context.Context, _ string) error { /* mark ctx */ })
+reg.Register("log:high-risk", func(ctx context.Context, _ string) error { /* emit log */ })
+
+decision, _ := client.Check(ctx, req)
+if decision.Allowed {
+    if err := reg.Apply(ctx, decision); err != nil { /* don't enforce */ }
+}
+```
+
+### DryRun
+
+Evaluate without emitting audit records:
+
+```go
+req := atlasent.CheckRequest{..., DryRun: true}
+```
 
 ### Batch checks
 
@@ -170,13 +225,45 @@ cd examples/grpc && ATLASENT_API_KEY=sk_live_... go run .
 
 Point at a non-production PDP with `ATLASENT_BASE_URL`.
 
+## Testing consumers
+
+Spin up a fake PDP in tests:
+
+```go
+fake := atlasenttest.NewServer(t)
+fake.On("invoice.pay").Allow()
+fake.OnResource("invoice", "secret_one").Deny("not owner")
+
+client, _ := atlasent.New("test", atlasent.WithBaseURL(fake.URL))
+// exercise code under test
+```
+
+## Framework middleware
+
+Same pattern as `HTTPMiddleware`, adapted to each framework:
+
+```go
+// Gin:    r.Use(atlasentgin.Middleware(client, resolve))
+// Echo:   e.Use(atlasentecho.Middleware(client, resolve))
+// Fiber:  app.Use(atlasentfiber.Middleware(client, resolve))
+```
+
+chi works with the built-in `HTTPMiddleware` directly (chi middleware is
+`func(http.Handler) http.Handler`).
+
 ## Layout
 
 ```
-atlasent/                  # core SDK (Client, Guard, HTTPMiddleware, Cache, Retry, Observer, batch)
+atlasent/                  # core SDK (Client, Guard, HTTPMiddleware, cache, retry, observer, batch, combinators, obligations, typed errors)
+atlasenttest/              # test fake: httptest-backed scripted PDP
 grpc/                      # gRPC server interceptors (separate go module)
+otel/                      # OpenTelemetry Observer (separate go module)
+cacheredis/                # Redis-backed Cache (separate go module)
+middleware/gin|echo|fiber/ # per-framework middleware (separate go modules)
 examples/quickstart/       # minimal Check + Guard + middleware walkthrough
 examples/dbguard/          # begin-tx → Guard → commit/rollback pattern
 examples/worker/           # queue consumer using CheckMany + obligations
 examples/grpc/             # gRPC server wiring (separate go module)
 ```
+
+A `go.work` file stitches the submodules together for local development.

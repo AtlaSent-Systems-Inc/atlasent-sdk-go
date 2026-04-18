@@ -37,7 +37,7 @@ func (c *Client) CheckMany(ctx context.Context, reqs []CheckRequest) ([]Decision
 
 	if c.cache != nil {
 		for i, r := range reqs {
-			if dec, ok := c.cache.Get(cacheKey(r)); ok {
+			if dec, ok := c.cache.Get(ctx, cacheKey(r)); ok {
 				out[i] = dec
 				c.observe(ctx, CheckEvent{Request: r, Decision: dec, CacheHit: true})
 				continue
@@ -89,7 +89,7 @@ func (c *Client) CheckMany(ctx context.Context, reqs []CheckRequest) ([]Decision
 		out[i] = d
 		if c.cache != nil {
 			if ttl := c.cacheTTL(d); ttl > 0 {
-				c.cache.Set(cacheKey(pendingReqs[k]), d, ttl)
+				c.cache.Set(ctx, cacheKey(pendingReqs[k]), d, ttl)
 			}
 		}
 		c.observe(ctx, CheckEvent{

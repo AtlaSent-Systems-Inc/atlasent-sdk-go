@@ -44,15 +44,22 @@ func (f ObserverFunc) OnCheck(ctx context.Context, ev CheckEvent) { f(ctx, ev) }
 func WithObserver(o Observer) Option { return func(c *Client) { c.observer = o } }
 
 // MultiObserver fans an event out to every observer in order. A nil entry is
-// skipped. Use when you want both metrics and tracing, for example.
+// skipped. Use when you want both metrics and tracing, for example. A panic
+// in one observer is recovered so later observers still run; the panic is
+// discarded.
 func MultiObserver(obs ...Observer) Observer {
 	return ObserverFunc(func(ctx context.Context, ev CheckEvent) {
 		for _, o := range obs {
 			if o != nil {
-				o.OnCheck(ctx, ev)
+				safeInvoke(ctx, o, ev)
 			}
 		}
 	})
+}
+
+func safeInvoke(ctx context.Context, o Observer, ev CheckEvent) {
+	defer func() { _ = recover() }()
+	o.OnCheck(ctx, ev)
 }
 
 // SlogObserver logs each event at info (allow) or warn (deny / error) on the

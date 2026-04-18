@@ -47,7 +47,11 @@ func TestGuardDeny(t *testing.T) {
 	}))
 
 	ran := false
-	_, err := Guard(context.Background(), c, CheckRequest{Action: "pay"}, func(ctx context.Context) (int, error) {
+	_, err := Guard(context.Background(), c, CheckRequest{
+		Principal: Principal{ID: "u"},
+		Action:    "pay",
+		Resource:  Resource{ID: "r", Type: "invoice"},
+	}, func(ctx context.Context) (int, error) {
 		ran = true
 		return 1, nil
 	})
@@ -69,7 +73,11 @@ func TestGuardDeny(t *testing.T) {
 func TestCheckFailClosed(t *testing.T) {
 	// Point at an address that refuses connections.
 	c, _ := New("k", WithBaseURL("http://127.0.0.1:1"))
-	d, err := c.Check(context.Background(), CheckRequest{Action: "x"})
+	d, err := c.Check(context.Background(), CheckRequest{
+		Principal: Principal{ID: "u"},
+		Action:    "x",
+		Resource:  Resource{ID: "r", Type: "doc"},
+	})
 	if err == nil {
 		t.Fatal("expected transport error")
 	}
