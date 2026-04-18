@@ -1,164 +1,139 @@
-// Package atlasent is the Go SDK for AtlaSent execution-time authorization.
-//
-// An AtlaSent Client is a Policy Decision Point (PDP) client: your application
-// asks the client whether a principal is allowed to perform an action on a
-// resource, right before the action is executed. The client returns a Decision
-// that your code either enforces (Guard, HTTPMiddleware) or inspects directly.
 package atlasent
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
-const (
-	defaultBaseURL = "https://api.atlasent.io"
-	defaultTimeout = 5 * time.Second
-	userAgent      = "atlasent-sdk-go/0.2"
-)
+// ClientOptions configures the AtlaSent client.
+type ClientOptions struct {
+	APIURL     string
+	APIKey     string
+	HTTPClient *http.Client
+	Timeout    time.Duration
+}
 
-// Client talks to the AtlaSent authorization service.
-//
-// Create one with New and reuse it for the lifetime of the process; it is safe
-// for concurrent use.
+// Client is the AtlaSent API client.
 type Client struct {
+	apiURL     string
 	apiKey     string
-	baseURL    string
 	httpClient *http.Client
-	// FailClosed controls what happens when the PDP is unreachable or returns
-	// a transport error. When true (the default), Check returns a Deny decision
-	// so the caller cannot accidentally allow a request. Set false only when
-	// availability matters more than correctness.
-	FailClosed bool
-
-	retry           RetryPolicy
-	cache           Cache
-	cacheDefaultTTL time.Duration
-	observer        Observer
-	rng             *rand.Rand
 }
 
-// Option configures a Client.
-type Option func(*Client)
-
-// WithBaseURL overrides the AtlaSent API endpoint (useful for staging or
-// self-hosted deployments).
-func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = u } }
-
-// WithHTTPClient swaps the underlying HTTP client. The provided client should
-// set its own Timeout; otherwise the default 5s is kept.
-func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.httpClient = h } }
-
-// WithFailOpen flips the default fail-closed behavior. Use with caution.
-func WithFailOpen() Option { return func(c *Client) { c.FailClosed = false } }
-
-// New returns a Client authenticated with the given API key.
-func New(apiKey string, opts ...Option) (*Client, error) {
-	if apiKey == "" {
-		return nil, errors.New("atlasent: apiKey is required")
+// New creates a new Client with the given options.
+func New(opts ClientOptions) *Client {
+	if opts.Timeout == 0 {
+		opts.Timeout = 10 * time.Second
 	}
-	c := &Client{
-		apiKey:     apiKey,
-		baseURL:    defaultBaseURL,
-		httpClient: &http.Client{Timeout: defaultTimeout},
-		FailClosed: true,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
+	hc := opts.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: opts.Timeout}
 	}
-	for _, opt := range opts {
-		opt(c)
+	return &Client{
+		apiURL:     strings.TrimRight(opts.APIURL, "/"),
+		apiKey:     opts.APIKey,
+		httpClient: hc,
 	}
-	return c, nil
 }
 
-// httpResult carries the parsed response plus retry metadata.
-type httpResult struct {
-	status     int
-	retryAfter time.Duration
-	body       []byte
-}
-
-// doJSON performs a single HTTP round trip and returns the raw result. It
-// does not retry or decode the body.
-func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, error) {
-	body, err := json.Marshal(in)
-	if err != nil {
-		return nil, fmt.Errorf("atlasent: marshal request: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("atlasent: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("atlasent: transport: %w", err)
-	}
-	defer resp.Body.Close()
-
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("atlasent: read body: %w", err)
-	}
-	return &httpResult{
-		status:     resp.StatusCode,
-		retryAfter: parseRetryAfter(resp.Header),
-		body:       buf,
-	}, nil
-}
-
-// postJSON runs doJSON with the configured retry policy and decodes a
-// successful 2xx body into out. attempts is the number of HTTP round trips
-// actually performed.
-func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attempts int, err error) {
-	max := c.retry.MaxAttempts
-	if max < 1 {
-		max = 1
-	}
-	var lastErr error
-	for attempt := 1; attempt <= max; attempt++ {
-		attempts = attempt
-		res, err := c.doJSON(ctx, path, in)
+func (c *Client) request(ctx context.Context, method, path string, body, out any) error {
+	var bodyReader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
 		if err != nil {
-			// Transport error: retry if we have attempts left.
-			lastErr = err
-			if attempt == max {
-				return attempts, lastErr
-			}
-			if werr := sleepCtx(ctx, c.retry.backoffFor(attempt, c.rng)); werr != nil {
-				return attempts, werr
-			}
-			continue
+			return fmt.Errorf("atlasent: marshal request: %w", err)
 		}
-		if res.status >= 200 && res.status < 300 {
-			if out == nil {
-				return attempts, nil
-			}
-			if err := json.Unmarshal(res.body, out); err != nil {
-				return attempts, fmt.Errorf("atlasent: decode response: %w", err)
-			}
-			return attempts, nil
+		bodyReader = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, bodyReader)
+	if err != nil {
+		return fmt.Errorf("atlasent: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-AtlaSent-Key", c.apiKey)
+
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("atlasent: do request: %w", err)
+	}
+	defer res.Body.Close()
+
+	b, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("atlasent: read response: %w", err)
+	}
+
+	if res.StatusCode >= 400 {
+		var apiErr APIError
+		if jsonErr := json.Unmarshal(b, &apiErr); jsonErr == nil && apiErr.Message != "" {
+			apiErr.Status = res.StatusCode
+			return &apiErr
 		}
-		lastErr = fmt.Errorf("atlasent: %d: %s", res.status, bytes.TrimSpace(res.body))
-		if !retryableStatus(res.status) || attempt == max {
-			return attempts, lastErr
-		}
-		wait := res.retryAfter
-		if wait == 0 {
-			wait = c.retry.backoffFor(attempt, c.rng)
-		}
-		if werr := sleepCtx(ctx, wait); werr != nil {
-			return attempts, werr
+		return &APIError{Code: "http_error", Message: res.Status, Status: res.StatusCode}
+	}
+
+	if out != nil {
+		if err := json.Unmarshal(b, out); err != nil {
+			return fmt.Errorf("atlasent: unmarshal response: %w", err)
 		}
 	}
-	return attempts, lastErr
+	return nil
+}
+
+// Evaluate calls POST /v1/evaluate and returns the decision + risk assessment.
+func (c *Client) Evaluate(ctx context.Context, payload EvaluationPayload) (*EvaluationResult, error) {
+	var result EvaluationResult
+	if err := c.request(ctx, http.MethodPost, "/v1/evaluate", payload, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// Authorize is a convenience wrapper that returns true iff decision == "allow".
+func (c *Client) Authorize(ctx context.Context, actor Actor, actionType string, target Target) (bool, *EvaluationResult, error) {
+	result, err := c.Evaluate(ctx, EvaluationPayload{
+		Actor:  actor,
+		Action: Action{ID: uuid.NewString(), Type: actionType},
+		Target: target,
+	})
+	if err != nil {
+		return false, nil, err
+	}
+	return result.Decision == DecisionAllow, result, nil
+}
+
+// VerifyPermit calls POST /v1/permits/{id}/verify.
+func (c *Client) VerifyPermit(ctx context.Context, permitID string) (*Permit, error) {
+	var p Permit
+	if err := c.request(ctx, http.MethodPost, "/v1/permits/"+permitID+"/verify", nil, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ConsumePermit calls POST /v1/permits/{id}/consume.
+func (c *Client) ConsumePermit(ctx context.Context, permitID string) (*Permit, error) {
+	var p Permit
+	if err := c.request(ctx, http.MethodPost, "/v1/permits/"+permitID+"/consume", nil, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// GetSession calls GET /v1/session.
+func (c *Client) GetSession(ctx context.Context) (*Session, error) {
+	var s Session
+	if err := c.request(ctx, http.MethodGet, "/v1/session", nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
