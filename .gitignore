@@ -7,3 +7,9 @@
 !.env.example
 .idea/
 .vscode/
+
+# go run/build leaves the binary named after the containing dir next to main.go
+/examples/grpc/grpc
+/examples/quickstart/quickstart
+/examples/dbguard/dbguard
+/examples/worker/worker

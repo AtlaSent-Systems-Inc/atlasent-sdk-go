@@ -60,14 +60,15 @@ func main() {
 		},
 	}
 
-	// 1. Direct Check.
+	// 1. Direct Check. Even on transport error the SDK returns a Decision
+	//    (fail-closed deny by default) — log the error and proceed.
 	decision, err := client.Check(ctx, atlasent.CheckRequest{
 		Principal: alice,
 		Action:    "invoice.read",
 		Resource:  invoice,
 	})
 	if err != nil {
-		log.Fatalf("check: %v", err)
+		log.Printf("check transport error: %v", err)
 	}
 	fmt.Printf("read allowed=%v reason=%q policy=%s\n",
 		decision.Allowed, decision.Reason, decision.PolicyID)
@@ -88,8 +89,10 @@ func main() {
 	switch {
 	case errors.As(err, &denied):
 		fmt.Printf("pay denied: %s (policy %s)\n", denied.Decision.Reason, denied.Decision.PolicyID)
+	case atlasent.IsTransport(err):
+		fmt.Printf("pay skipped: pdp unavailable (%v)\n", err)
 	case err != nil:
-		log.Fatalf("pay: %v", err)
+		fmt.Printf("pay error: %v\n", err)
 	default:
 		fmt.Printf("pay ok: %s\n", receipt)
 	}

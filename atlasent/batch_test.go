@@ -63,7 +63,7 @@ func TestCheckManyHonorsCache(t *testing.T) {
 		{Action: "read", Resource: Resource{ID: "b", Type: "doc"}},
 	}
 	// Pre-seed cache for "a" with a distinguishable decision.
-	cache.Set(cacheKey(reqs[0]), Decision{Allowed: true, PolicyID: "cached"}, time.Minute)
+	cache.Set(context.Background(), cacheKey(reqs[0]), Decision{Allowed: true, PolicyID: "cached"}, time.Minute)
 
 	decs, err := c.CheckMany(context.Background(), reqs)
 	if err != nil {
@@ -109,7 +109,7 @@ func TestCheckManyAllCached(t *testing.T) {
 		{Action: "b"},
 	}
 	for _, r := range reqs {
-		cache.Set(cacheKey(r), Decision{Allowed: true}, time.Minute)
+		cache.Set(context.Background(), cacheKey(r), Decision{Allowed: true}, time.Minute)
 	}
 	decs, err := c.CheckMany(context.Background(), reqs)
 	if err != nil {

@@ -2,6 +2,7 @@ package atlasent
 
 import (
 	"container/list"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,9 +13,13 @@ import (
 // Cache caches Decisions keyed by a request fingerprint. Implementations must
 // be safe for concurrent use. A cache hit skips the PDP entirely, so only
 // wire one in if stale-but-fast is acceptable for the hot path.
+//
+// The context is passed through so networked implementations (Redis,
+// Memcached) can honor cancellation and deadlines; in-process caches may
+// ignore it.
 type Cache interface {
-	Get(key string) (Decision, bool)
-	Set(key string, dec Decision, ttl time.Duration)
+	Get(ctx context.Context, key string) (Decision, bool)
+	Set(ctx context.Context, key string, dec Decision, ttl time.Duration)
 }
 
 // WithCache installs a decision cache on the Client. By default decisions are
@@ -69,7 +74,7 @@ func NewMemoryCache(capacity int) *MemoryCache {
 	}
 }
 
-func (m *MemoryCache) Get(key string) (Decision, bool) {
+func (m *MemoryCache) Get(_ context.Context, key string) (Decision, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -87,7 +92,7 @@ func (m *MemoryCache) Get(key string) (Decision, bool) {
 	return entry.decision, true
 }
 
-func (m *MemoryCache) Set(key string, dec Decision, ttl time.Duration) {
+func (m *MemoryCache) Set(_ context.Context, key string, dec Decision, ttl time.Duration) {
 	if ttl <= 0 {
 		return
 	}

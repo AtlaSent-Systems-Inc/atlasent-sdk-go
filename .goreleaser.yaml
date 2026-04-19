@@ -1,0 +1,82 @@
+# Goreleaser config for atlasent-sdk-go.
+#
+# This SDK is a library, not a binary, so the usual goreleaser flow
+# (cross-compiled archives, homebrew taps) doesn't apply. What we
+# DO want is:
+#   - a tagged GitHub Release with an auto-generated changelog,
+#   - a signed source archive for reproducible downstream packaging,
+#   - SBOMs for every artifact.
+#
+# Run `goreleaser release --clean` from the repo root after tagging
+# vX.Y.Z on the main module. Submodules are tagged separately — see
+# RELEASING.md for the multi-module dance.
+version: 2
+
+project_name: atlasent-sdk-go
+
+before:
+  hooks:
+    - go mod tidy
+    - go test -race ./atlasent/...
+
+builds:
+  - skip: true
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_source
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+?\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+?\))??!?:.+$'
+      order: 10
+    - title: Others
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: AtlaSent-Systems-Inc
+    name: atlasent-sdk-go
+  draft: true
+  prerelease: auto
+  header: |
+    See [CHANGELOG.md](https://github.com/AtlaSent-Systems-Inc/atlasent-sdk-go/blob/main/CHANGELOG.md)
+    for the curated human changelog. The auto-generated list below is
+    commit-level and reflects every merge since the previous tag.
+  footer: |
+    **Submodule tags** for this release (so external consumers can
+    `go get` each at a resolvable version):
+
+      grpc/v{{ .Version }}
+      connectrpc/v{{ .Version }}
+      otel/v{{ .Version }}
+      cacheredis/v{{ .Version }}
+      middleware/gin/v{{ .Version }}
+      middleware/echo/v{{ .Version }}
+      middleware/fiber/v{{ .Version }}

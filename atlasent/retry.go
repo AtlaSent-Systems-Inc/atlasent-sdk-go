@@ -2,7 +2,7 @@ package atlasent
 
 import (
 	"context"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"time"
@@ -70,7 +70,10 @@ func parseRetryAfter(h http.Header) time.Duration {
 }
 
 // backoffFor returns the delay before attempt n (1-indexed retry count).
-func (p RetryPolicy) backoffFor(attempt int, rng *rand.Rand) time.Duration {
+// jitterFloat supplies a [0,1) random; tests inject a fake to make output
+// deterministic. Production callers should pass jitterRand, which uses the
+// goroutine-safe math/rand/v2 package source.
+func (p RetryPolicy) backoffFor(attempt int, jitterFloat func() float64) time.Duration {
 	if p.InitialBackoff <= 0 {
 		return 0
 	}
@@ -85,12 +88,16 @@ func (p RetryPolicy) backoffFor(attempt int, rng *rand.Rand) time.Duration {
 	if max := float64(p.MaxBackoff); max > 0 && d > max {
 		d = max
 	}
-	if p.Jitter && rng != nil {
+	if p.Jitter && jitterFloat != nil {
 		// ±50% jitter.
-		d = d * (0.5 + rng.Float64())
+		d = d * (0.5 + jitterFloat())
 	}
 	return time.Duration(d)
 }
+
+// jitterRand is the default jitter source. math/rand/v2 package-level
+// functions are safe for concurrent use.
+func jitterRand() float64 { return rand.Float64() }
 
 // sleepCtx sleeps for d or returns ctx.Err() if the context is cancelled first.
 func sleepCtx(ctx context.Context, d time.Duration) error {

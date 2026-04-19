@@ -1,9 +1,3 @@
-// Package atlasent is the Go SDK for AtlaSent execution-time authorization.
-//
-// An AtlaSent Client is a Policy Decision Point (PDP) client: your application
-// asks the client whether a principal is allowed to perform an action on a
-// resource, right before the action is executed. The client returns a Decision
-// that your code either enforces (Guard, HTTPMiddleware) or inspects directly.
 package atlasent
 
 import (
@@ -13,15 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"time"
 )
 
+// Version is the SDK release string. Exposed for consumers that want to log
+// or report which version is in use.
+const Version = "1.1.0"
+
 const (
 	defaultBaseURL = "https://api.atlasent.io"
 	defaultTimeout = 5 * time.Second
-	userAgent      = "atlasent-sdk-go/0.2"
+	userAgent      = "atlasent-sdk-go/" + Version
 )
 
 // Client talks to the AtlaSent authorization service.
@@ -42,7 +39,9 @@ type Client struct {
 	cache           Cache
 	cacheDefaultTTL time.Duration
 	observer        Observer
-	rng             *rand.Rand
+	breaker         *breaker
+	enricher        ContextEnricher
+	local           LocalEvaluator
 }
 
 // Option configures a Client.
@@ -69,7 +68,6 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 		baseURL:    defaultBaseURL,
 		httpClient: &http.Client{Timeout: defaultTimeout},
 		FailClosed: true,
-		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -85,15 +83,16 @@ type httpResult struct {
 }
 
 // doJSON performs a single HTTP round trip and returns the raw result. It
-// does not retry or decode the body.
+// does not retry or decode the body. Transport failures become *APIError
+// with KindTransport.
 func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, error) {
 	body, err := json.Marshal(in)
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: marshal request: %w", err)
+		return nil, &APIError{Kind: KindValidation, Cause: fmt.Errorf("marshal request: %w", err)}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: build request: %w", err)
+		return nil, &APIError{Kind: KindTransport, Cause: fmt.Errorf("build request: %w", err)}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -101,13 +100,13 @@ func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: transport: %w", err)
+		return nil, &APIError{Kind: KindTransport, Cause: err}
 	}
 	defer resp.Body.Close()
 
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("atlasent: read body: %w", err)
+		return nil, &APIError{Kind: KindTransport, Cause: fmt.Errorf("read body: %w", err)}
 	}
 	return &httpResult{
 		status:     resp.StatusCode,
@@ -120,6 +119,16 @@ func (c *Client) doJSON(ctx context.Context, path string, in any) (*httpResult, 
 // successful 2xx body into out. attempts is the number of HTTP round trips
 // actually performed.
 func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attempts int, err error) {
+	if c.breaker != nil && !c.breaker.allow() {
+		return 0, breakerError()
+	}
+	if c.breaker != nil {
+		defer func() {
+			if err != nil {
+				c.breaker.onFailure()
+			}
+		}()
+	}
 	max := c.retry.MaxAttempts
 	if max < 1 {
 		max = 1
@@ -134,27 +143,34 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attemp
 			if attempt == max {
 				return attempts, lastErr
 			}
-			if werr := sleepCtx(ctx, c.retry.backoffFor(attempt, c.rng)); werr != nil {
+			if werr := sleepCtx(ctx, c.retry.backoffFor(attempt, jitterRand)); werr != nil {
 				return attempts, werr
 			}
 			continue
 		}
 		if res.status >= 200 && res.status < 300 {
+			if c.breaker != nil {
+				c.breaker.onSuccess()
+			}
 			if out == nil {
 				return attempts, nil
 			}
 			if err := json.Unmarshal(res.body, out); err != nil {
-				return attempts, fmt.Errorf("atlasent: decode response: %w", err)
+				return attempts, &APIError{Kind: KindServer, Status: res.status, Cause: fmt.Errorf("decode response: %w", err)}
 			}
 			return attempts, nil
 		}
-		lastErr = fmt.Errorf("atlasent: %d: %s", res.status, bytes.TrimSpace(res.body))
+		lastErr = &APIError{
+			Kind:   classifyHTTP(res.status),
+			Status: res.status,
+			Body:   string(bytes.TrimSpace(res.body)),
+		}
 		if !retryableStatus(res.status) || attempt == max {
 			return attempts, lastErr
 		}
 		wait := res.retryAfter
 		if wait == 0 {
-			wait = c.retry.backoffFor(attempt, c.rng)
+			wait = c.retry.backoffFor(attempt, jitterRand)
 		}
 		if werr := sleepCtx(ctx, wait); werr != nil {
 			return attempts, werr

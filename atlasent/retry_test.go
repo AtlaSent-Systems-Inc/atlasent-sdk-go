@@ -101,7 +101,7 @@ func TestBackoffGrowsAndCaps(t *testing.T) {
 		MaxBackoff:     400 * time.Millisecond,
 		Multiplier:     2.0,
 	}
-	// No jitter, rng nil is fine.
+	// No jitter; nil jitter func is fine.
 	if got := p.backoffFor(1, nil); got != 100*time.Millisecond {
 		t.Fatalf("attempt 1: want 100ms, got %v", got)
 	}

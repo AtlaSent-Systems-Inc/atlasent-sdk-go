@@ -80,3 +80,20 @@ func TestDecisionHasObligation(t *testing.T) {
 		t.Fatal("false positive obligation")
 	}
 }
+
+func TestMultiObserverPanicIsolated(t *testing.T) {
+	calls := make([]string, 0, 3)
+	first := ObserverFunc(func(_ context.Context, _ CheckEvent) { calls = append(calls, "first") })
+	panicker := ObserverFunc(func(_ context.Context, _ CheckEvent) {
+		calls = append(calls, "panicker")
+		panic("boom")
+	})
+	last := ObserverFunc(func(_ context.Context, _ CheckEvent) { calls = append(calls, "last") })
+
+	multi := MultiObserver(first, panicker, last)
+	multi.OnCheck(context.Background(), CheckEvent{})
+
+	if len(calls) != 3 || calls[0] != "first" || calls[1] != "panicker" || calls[2] != "last" {
+		t.Fatalf("observer isolation broken: %v", calls)
+	}
+}

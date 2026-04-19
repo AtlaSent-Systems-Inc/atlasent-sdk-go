@@ -32,12 +32,20 @@ func (c *Client) CheckMany(ctx context.Context, reqs []CheckRequest) ([]Decision
 		return out, nil
 	}
 
+	if c.enricher != nil {
+		enriched := make([]CheckRequest, len(reqs))
+		for i, r := range reqs {
+			enriched[i] = c.applyEnricher(ctx, r)
+		}
+		reqs = enriched
+	}
+
 	pending := make([]int, 0, len(reqs))
 	pendingReqs := make([]CheckRequest, 0, len(reqs))
 
 	if c.cache != nil {
 		for i, r := range reqs {
-			if dec, ok := c.cache.Get(cacheKey(r)); ok {
+			if dec, ok := c.cache.Get(ctx, cacheKey(r)); ok {
 				out[i] = dec
 				c.observe(ctx, CheckEvent{Request: r, Decision: dec, CacheHit: true})
 				continue
@@ -89,7 +97,7 @@ func (c *Client) CheckMany(ctx context.Context, reqs []CheckRequest) ([]Decision
 		out[i] = d
 		if c.cache != nil {
 			if ttl := c.cacheTTL(d); ttl > 0 {
-				c.cache.Set(cacheKey(pendingReqs[k]), d, ttl)
+				c.cache.Set(ctx, cacheKey(pendingReqs[k]), d, ttl)
 			}
 		}
 		c.observe(ctx, CheckEvent{

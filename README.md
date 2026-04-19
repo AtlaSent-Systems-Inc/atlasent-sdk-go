@@ -13,10 +13,23 @@ go get github.com/atlasent-systems-inc/atlasent-sdk-go/atlasent
 
 Requires Go 1.21+ (the `Guard` helper uses generics).
 
-Optional subpackage for gRPC servers:
+Optional submodules:
 
 ```sh
-go get github.com/atlasent-systems-inc/atlasent-sdk-go/grpc
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/grpc            # gRPC server interceptors
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/connectrpc      # connectrpc.com/connect interceptor
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/otel            # OpenTelemetry metrics + spans + trace-ID enricher
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/cacheredis      # Redis-backed decision cache
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/bundle          # hybrid-mode: signed local bundles + fall-through
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/gin
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/echo
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/fiber
+```
+
+For testing consumers of this SDK:
+
+```sh
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/atlasenttest
 ```
 
 ## QuickStart
@@ -79,6 +92,139 @@ s := grpc.NewServer(
 Maps to gRPC status codes:
 `Unauthenticated` (no Principal), `InvalidArgument` (resolver error),
 `PermissionDenied` (PDP denied), `Unavailable` (fail-closed + PDP down).
+
+### Typed errors
+
+Check against ErrorKind for programmatic handling:
+
+```go
+_, err := client.Check(ctx, req)
+switch {
+case atlasent.IsTransport(err):  // network
+case atlasent.IsUnauthorized(err): // bad API key
+case atlasent.IsRateLimit(err):   // 429 — back off
+case atlasent.IsValidation(err):  // missing Action, etc
+}
+```
+
+### Combinators
+
+```go
+i, dec, err := client.CheckAny(ctx, reqs) // first allowed — single round trip
+decs, err  := client.CheckAll(ctx, reqs)  // all-or-DeniedError
+```
+
+### Obligations
+
+Register handlers so unknown obligations become errors, not silent drops:
+
+```go
+reg := atlasent.NewObligationRegistry()
+reg.Register("redact:ssn", func(ctx context.Context, _ string) error { /* mark ctx */ })
+reg.Register("log:high-risk", func(ctx context.Context, _ string) error { /* emit log */ })
+
+decision, _ := client.Check(ctx, req)
+if decision.Allowed {
+    if err := reg.Apply(ctx, decision); err != nil { /* don't enforce */ }
+}
+```
+
+### Circuit breaker
+
+Avoid dog-piling on a known-down PDP:
+
+```go
+client, _ := atlasent.New(apiKey, atlasent.WithCircuitBreaker(atlasent.BreakerConfig{
+    FailureThreshold: 5,
+    CoolDown:         30 * time.Second,
+    OnStateChange: func(from, to atlasent.BreakerState) {
+        log.Printf("pdp breaker %v -> %v", from, to)
+    },
+}))
+```
+
+After N consecutive failures the breaker opens; `Check` fails fast for
+the cool-down period, then lets one probe through. `OnStateChange`
+fires on every transition.
+
+### Hybrid mode (local bundles)
+
+For single-digit-µs Checks on the hot path, pull signed policy bundles
+from the PDP and evaluate locally:
+
+```go
+import "github.com/atlasent-systems-inc/atlasent-sdk-go/bundle"
+
+sync, _ := bundle.NewHTTPSyncer(bundle.HTTPSyncerConfig{
+    URL:       "https://api.atlasent.io/v1/bundles/prod",
+    APIKey:    apiKey,
+    PublicKey: verifyKey, // Ed25519
+})
+mgr, _ := bundle.NewManager(sync, myPolicyEngine)
+defer mgr.Close()
+
+client, _ := atlasent.New(apiKey, atlasent.WithLocalEvaluator(mgr))
+```
+
+`PolicyEngine` is pluggable (Cedar, Rego, CEL). When the engine returns
+"no opinion" the Client falls through to the remote PDP automatically.
+
+### Request ID propagation
+
+```go
+client, _ := atlasent.New(apiKey,
+    atlasent.WithContextEnricher(atlasent.RequestIDEnricher()))
+
+// In your HTTP middleware:
+ctx := atlasent.WithRequestID(r.Context(), r.Header.Get("X-Request-Id"))
+```
+
+Every `Check` now carries `request_id` in `CheckRequest.Context` so
+audit logs correlate without each call-site wiring it manually. Compose
+multiple enrichers with `atlasent.ChainEnrichers(...)`.
+
+### Async observer
+
+Hand events to a background goroutine so slow metric exporters never
+block `Check`:
+
+```go
+async := atlasent.NewAsyncObserver(atlasentotel.NewObserver(meter, tracer), 4096)
+defer async.Close()
+client, _ := atlasent.New(apiKey, atlasent.WithObserver(async))
+```
+
+### Resource from struct tags
+
+Derive `Resource` from domain types so policy call-sites stay short:
+
+```go
+type Invoice struct {
+    ID       string `atlasent:"id"`
+    Customer string `atlasent:"attr,name=customer_id"`
+    Amount   int    `atlasent:"attr"`
+}
+
+res, _ := atlasent.ResourceFrom(inv, "invoice")
+client.Check(ctx, atlasent.CheckRequest{Principal: alice, Action: "invoice.read", Resource: res})
+```
+
+### JWT claims → Principal
+
+```go
+principal, _ := atlasent.PrincipalFromClaims(claims,
+    atlasent.WithGroupsClaim("cognito:groups"))
+```
+
+This does NOT verify signatures — use your JWT library first.
+
+### DryRun
+
+Evaluate without emitting audit records:
+
+```go
+req := atlasent.CheckRequest{..., DryRun: true}
+```
 
 ### Batch checks
 
@@ -170,13 +316,61 @@ cd examples/grpc && ATLASENT_API_KEY=sk_live_... go run .
 
 Point at a non-production PDP with `ATLASENT_BASE_URL`.
 
+## Testing consumers
+
+Spin up a fake PDP in tests:
+
+```go
+fake := atlasenttest.NewServer(t)
+fake.On("invoice.pay").Allow()
+fake.OnResource("invoice", "secret_one").Deny("not owner")
+
+client, _ := atlasent.New("test", atlasent.WithBaseURL(fake.URL))
+// exercise code under test
+```
+
+## Framework middleware
+
+Same pattern as `HTTPMiddleware`, adapted to each framework:
+
+```go
+// Gin:    r.Use(atlasentgin.Middleware(client, resolve))
+// Echo:   e.Use(atlasentecho.Middleware(client, resolve))
+// Fiber:  app.Use(atlasentfiber.Middleware(client, resolve))
+```
+
+chi needs no adapter — the built-in `HTTPMiddleware` has the same shape
+as `chi.Router.Use`:
+
+```go
+r := chi.NewRouter()
+r.Use(jwtAuth) // set Principal on ctx
+r.Use(client.HTTPMiddleware(resolve))
+r.Get("/invoices/{id}", invoiceHandler)
+```
+
+For gRPC-style [Connect](https://connectrpc.com/):
+
+```go
+import atlasentconnect "github.com/atlasent-systems-inc/atlasent-sdk-go/connectrpc"
+
+ic := atlasentconnect.NewInterceptor(client, resolve)
+path, h := billingv1connect.NewInvoicesServiceHandler(svc, connect.WithInterceptors(ic))
+```
+
 ## Layout
 
 ```
-atlasent/                  # core SDK (Client, Guard, HTTPMiddleware, Cache, Retry, Observer, batch)
+atlasent/                  # core SDK (Client, Guard, HTTPMiddleware, cache, retry, observer, batch, combinators, obligations, typed errors)
+atlasenttest/              # test fake: httptest-backed scripted PDP
 grpc/                      # gRPC server interceptors (separate go module)
+otel/                      # OpenTelemetry Observer (separate go module)
+cacheredis/                # Redis-backed Cache (separate go module)
+middleware/gin|echo|fiber/ # per-framework middleware (separate go modules)
 examples/quickstart/       # minimal Check + Guard + middleware walkthrough
 examples/dbguard/          # begin-tx → Guard → commit/rollback pattern
 examples/worker/           # queue consumer using CheckMany + obligations
 examples/grpc/             # gRPC server wiring (separate go module)
 ```
+
+A `go.work` file stitches the submodules together for local development.

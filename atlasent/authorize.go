@@ -30,7 +30,24 @@ type CheckRequest struct {
 	Action    string         `json:"action"`
 	Resource  Resource       `json:"resource"`
 	Context   map[string]any `json:"context,omitempty"`
+	// DryRun asks the PDP to evaluate the request without emitting audit
+	// records or side-effects (useful for "what-if" pages, policy authoring,
+	// UI affordance pre-checks).
+	DryRun bool `json:"dry_run,omitempty"`
 }
+
+// Validate reports whether a request has the minimum fields required. Only
+// Action is strictly required — empty principals and resources sometimes
+// make sense (global admin actions, anonymous reads). The PDP may reject
+// more; this is a cheap local fast-fail.
+func (r CheckRequest) Validate() error {
+	if r.Action == "" {
+		return &APIError{Kind: KindValidation, Cause: errAction}
+	}
+	return nil
+}
+
+var errAction = errors.New("empty action")
 
 // Decision is the PDP's answer.
 type Decision struct {
@@ -93,8 +110,28 @@ func (c *Client) cacheTTL(d Decision) time.Duration {
 // If a Cache is configured, Check consults it first and skips the HTTP call
 // on a hit. Observers are notified on every call (cache hit or miss).
 func (c *Client) Check(ctx context.Context, req CheckRequest) (Decision, error) {
+	if err := req.Validate(); err != nil {
+		return Decision{Allowed: false, Reason: "invalid request"}, err
+	}
+	req = c.applyEnricher(ctx, req)
+	if c.local != nil {
+		if dec, ok, err := c.local.Evaluate(ctx, req); ok && err == nil {
+			c.observe(ctx, CheckEvent{
+				Request:  req,
+				Decision: dec,
+				LocalHit: true,
+			})
+			return dec, nil
+		} else if err != nil {
+			c.observe(ctx, CheckEvent{
+				Request: req,
+				Err:     err,
+			})
+			// fall through to remote on local-eval error
+		}
+	}
 	if c.cache != nil {
-		if dec, ok := c.cache.Get(cacheKey(req)); ok {
+		if dec, ok := c.cache.Get(ctx, cacheKey(req)); ok {
 			c.observe(ctx, CheckEvent{
 				Request:  req,
 				Decision: dec,
@@ -123,7 +160,7 @@ func (c *Client) Check(ctx context.Context, req CheckRequest) (Decision, error) 
 
 	if c.cache != nil {
 		if ttl := c.cacheTTL(d); ttl > 0 {
-			c.cache.Set(cacheKey(req), d, ttl)
+			c.cache.Set(ctx, cacheKey(req), d, ttl)
 		}
 	}
 	c.observe(ctx, CheckEvent{Request: req, Decision: d, Latency: latency, Attempts: attempts})
