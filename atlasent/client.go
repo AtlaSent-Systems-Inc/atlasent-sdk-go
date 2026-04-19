@@ -13,7 +13,7 @@ import (
 
 // Version is the SDK release string. Exposed for consumers that want to log
 // or report which version is in use.
-const Version = "0.3.0"
+const Version = "1.1.0"
 
 const (
 	defaultBaseURL = "https://api.atlasent.io"
