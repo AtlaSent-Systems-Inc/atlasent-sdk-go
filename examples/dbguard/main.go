@@ -61,6 +61,8 @@ func main() {
 	switch {
 	case errors.As(err, &denied):
 		fmt.Printf("denied: %s (policy %s)\n", denied.Decision.Reason, denied.Decision.PolicyID)
+	case atlasent.IsTransport(err):
+		fmt.Printf("skipped: pdp unavailable (%v)\n", err)
 	case err != nil:
 		log.Fatalf("update: %v", err)
 	default:
