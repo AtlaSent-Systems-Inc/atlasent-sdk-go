@@ -82,6 +82,51 @@ func TestBreakerHalfOpenRecovers(t *testing.T) {
 	}
 }
 
+func TestBreakerIgnoresAuthErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c, _ := New("k",
+		WithBaseURL(srv.URL),
+		WithCircuitBreaker(BreakerConfig{FailureThreshold: 2, CoolDown: time.Hour}),
+	)
+	req := CheckRequest{Principal: Principal{ID: "u"}, Action: "x", Resource: Resource{ID: "r", Type: "doc"}}
+
+	// 5 consecutive 401s — well over the threshold — must NOT trip the
+	// breaker, because 401 is a caller mistake (bad API key), not a PDP
+	// outage. The breaker should keep letting calls through so the
+	// underlying Unauthorized surfaces to the caller every time.
+	for i := 0; i < 5; i++ {
+		_, err := c.Check(context.Background(), req)
+		if !IsUnauthorized(err) {
+			t.Fatalf("attempt %d: want IsUnauthorized, got %v", i, err)
+		}
+	}
+}
+
+func TestBreakerOpensOnDecodeFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 200 OK but body is not valid JSON for Decision.
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	c, _ := New("k",
+		WithBaseURL(srv.URL),
+		WithCircuitBreaker(BreakerConfig{FailureThreshold: 2, CoolDown: time.Hour}),
+	)
+	req := CheckRequest{Principal: Principal{ID: "u"}, Action: "x", Resource: Resource{ID: "r", Type: "doc"}}
+
+	for i := 0; i < 2; i++ {
+		_, _ = c.Check(context.Background(), req)
+	}
+	if _, err := c.Check(context.Background(), req); !IsBreakerOpen(err) {
+		t.Fatalf("decode failures should trip breaker, got %v", err)
+	}
+}
+
 func TestBreakerHalfOpenReopensOnFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
