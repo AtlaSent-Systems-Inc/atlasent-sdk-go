@@ -17,10 +17,14 @@ import (
 	"time"
 )
 
+// Version is the SDK release string. Exposed for consumers that want to log
+// or report which version is in use.
+const Version = "0.3.0"
+
 const (
 	defaultBaseURL = "https://api.atlasent.io"
 	defaultTimeout = 5 * time.Second
-	userAgent      = "atlasent-sdk-go/0.3"
+	userAgent      = "atlasent-sdk-go/" + Version
 )
 
 // Client talks to the AtlaSent authorization service.
