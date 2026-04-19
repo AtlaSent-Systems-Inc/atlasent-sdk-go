@@ -124,7 +124,11 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attemp
 	}
 	if c.breaker != nil {
 		defer func() {
-			if err != nil {
+			// Only count transient failures (transport / 429 / 5xx).
+			// Counting 401/403/400/validation would open the circuit on
+			// caller mistakes and mask the underlying cause behind
+			// "circuit breaker open".
+			if err != nil && isTransientFailure(err) {
 				c.breaker.onFailure()
 			}
 		}()
@@ -149,14 +153,20 @@ func (c *Client) postJSON(ctx context.Context, path string, in, out any) (attemp
 			continue
 		}
 		if res.status >= 200 && res.status < 300 {
-			if c.breaker != nil {
-				c.breaker.onSuccess()
-			}
 			if out == nil {
+				if c.breaker != nil {
+					c.breaker.onSuccess()
+				}
 				return attempts, nil
 			}
 			if err := json.Unmarshal(res.body, out); err != nil {
+				// Decode failure is a protocol-level outage, not a
+				// success — let the deferred breaker.onFailure run via
+				// the returned APIError.
 				return attempts, &APIError{Kind: KindServer, Status: res.status, Cause: fmt.Errorf("decode response: %w", err)}
+			}
+			if c.breaker != nil {
+				c.breaker.onSuccess()
 			}
 			return attempts, nil
 		}

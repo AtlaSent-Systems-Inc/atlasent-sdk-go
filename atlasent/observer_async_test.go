@@ -54,6 +54,30 @@ func TestAsyncObserverDropsWhenFull(t *testing.T) {
 	}
 }
 
+func TestAsyncObserverNoPanicOnConcurrentClose(t *testing.T) {
+	// Hammer OnCheck from many goroutines while a separate goroutine
+	// calls Close. The pre-fix version would panic on "send on closed
+	// channel" under this load.
+	a := NewAsyncObserver(ObserverFunc(func(_ context.Context, _ CheckEvent) {}), 4)
+
+	const senders = 32
+	var wg sync.WaitGroup
+	wg.Add(senders)
+	for i := 0; i < senders; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				a.OnCheck(context.Background(), CheckEvent{})
+			}
+		}()
+	}
+	// Close while sends are mid-flight.
+	a.Close()
+	wg.Wait()
+	// And the OnCheck calls keep being safe after Close.
+	a.OnCheck(context.Background(), CheckEvent{})
+}
+
 func TestAsyncObserverSurvivesPanic(t *testing.T) {
 	var ran atomic.Bool
 	inner := ObserverFunc(func(_ context.Context, ev CheckEvent) {

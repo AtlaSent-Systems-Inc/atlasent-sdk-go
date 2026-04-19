@@ -112,6 +112,24 @@ var errBreakerOpen = errors.New("circuit breaker open")
 // circuit breaker blocked a call.
 func IsBreakerOpen(err error) bool { return errors.Is(err, errBreakerOpen) }
 
+// isTransientFailure classifies an error for circuit-breaker purposes:
+// transport / 429 / 5xx and unknown errors are transient and may indicate
+// PDP unavailability; 401 / 403 / 400 / validation are caller mistakes
+// and must NOT trip the breaker (otherwise a typo in an API key would
+// open the circuit and mask the real cause).
+func isTransientFailure(err error) bool {
+	switch kindOf(err) {
+	case KindTransport, KindRateLimit, KindServer:
+		return true
+	case KindUnauthorized, KindForbidden, KindInvalid, KindValidation:
+		return false
+	default:
+		// Unknown error class — be conservative and count it; the
+		// alternative is silently ignoring real outages.
+		return true
+	}
+}
+
 // classifyHTTP maps a response status to an ErrorKind.
 func classifyHTTP(status int) ErrorKind {
 	switch {
