@@ -20,7 +20,7 @@ import (
 const (
 	defaultBaseURL = "https://api.atlasent.io"
 	defaultTimeout = 5 * time.Second
-	userAgent      = "atlasent-sdk-go/0.2"
+	userAgent      = "atlasent-sdk-go/0.3"
 )
 
 // Client talks to the AtlaSent authorization service.
