@@ -1,0 +1,88 @@
+# AtlaSent Go SDK — goreleaser config.
+#
+# Produces signed source archives and SHA-256 checksums on git tag push.
+# The SDK is pure-Go and has no CLI, so we do NOT build per-OS binaries;
+# release artefacts exist for auditability (what got tagged, signed by whom)
+# rather than distribution (pkg.go.dev serves the module).
+version: 2
+
+project_name: atlasent-sdk-go
+
+builds:
+  # No binaries — this is a library.
+  - skip: true
+
+source:
+  enabled: true
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+  format: tar.gz
+
+archives:
+  - id: source-only
+    files:
+      - LICENSE*
+      - README.md
+      - CHANGELOG.md
+      - SECURITY.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+signs:
+  # Keyless signing via sigstore cosign. Requires OIDC credentials in CI
+  # (GitHub Actions provides them automatically with id-token: write).
+  - id: cosign
+    cmd: cosign
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature
+      - "${signature}"
+      - --output-certificate
+      - "${certificate}"
+      - "${artifact}"
+    artifacts: checksum
+    certificate: "${artifact}.pem"
+    signature: "${artifact}.sig"
+    output: true
+
+release:
+  github:
+    owner: AtlaSent-Systems-Inc
+    name: atlasent-sdk-go
+  draft: false
+  prerelease: auto
+  mode: append
+  header: |
+    ## atlasent-sdk-go {{ .Tag }}
+
+    Install:
+
+    ```bash
+    go get github.com/atlasent-systems-inc/atlasent-sdk-go@{{ .Tag }}
+    ```
+
+    See [CHANGELOG.md](./CHANGELOG.md) for details.
+  footer: |
+    Signed artefacts are keyless-signed via sigstore cosign. Verify with:
+
+    ```bash
+    cosign verify-blob \
+      --certificate atlasent-sdk-go_{{ .Version }}_checksums.txt.pem \
+      --signature   atlasent-sdk-go_{{ .Version }}_checksums.txt.sig \
+      --certificate-identity-regexp 'https://github.com/AtlaSent-Systems-Inc/atlasent-sdk-go/.*' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      atlasent-sdk-go_{{ .Version }}_checksums.txt
+    ```
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^ci:"
+      - "^test:"
+      - "Merge pull request"
+      - "Merge branch"

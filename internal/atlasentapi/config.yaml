@@ -1,0 +1,12 @@
+# oapi-codegen config for atlasent-api/openapi.yaml.
+# Regenerate with: go generate ./internal/atlasentapi/...
+package: atlasentapi
+output: zz_generated.go
+generate:
+  models: true
+  client: true
+  embedded-spec: true
+output-options:
+  skip-prune: true
+  user-templates:
+    # Keep room for in-repo overrides without forking the generator.

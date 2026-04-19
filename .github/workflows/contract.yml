@@ -1,0 +1,23 @@
+name: Contract
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'atlasent/**'
+      - 'atlasent/testdata/contract/**'
+      - '.github/workflows/contract.yml'
+  pull_request:
+    branches: [main]
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Contract tests
+        run: go test -count=1 -run TestContract ./atlasent/...
