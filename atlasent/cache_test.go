@@ -77,7 +77,11 @@ func TestCacheKeyStable(t *testing.T) {
 		Action:    "read",
 		Resource:  Resource{ID: "r1", Type: "doc"},
 	}
-	if cacheKey(req) != cacheKey(req) {
+	// Same input should hash to the same key. Compute via two distinct
+	// values so static analyzers don't fold the comparison.
+	a := cacheKey(req)
+	b := cacheKey(req)
+	if a != b {
 		t.Fatal("cacheKey not stable across calls")
 	}
 	alt := req
