@@ -6,6 +6,7 @@ use (
 	./connectrpc
 	./otel
 	./cacheredis
+	./bundle
 	./middleware/gin
 	./middleware/echo
 	./middleware/fiber

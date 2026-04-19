@@ -114,6 +114,22 @@ func (c *Client) Check(ctx context.Context, req CheckRequest) (Decision, error) 
 		return Decision{Allowed: false, Reason: "invalid request"}, err
 	}
 	req = c.applyEnricher(ctx, req)
+	if c.local != nil {
+		if dec, ok, err := c.local.Evaluate(ctx, req); ok && err == nil {
+			c.observe(ctx, CheckEvent{
+				Request:  req,
+				Decision: dec,
+				LocalHit: true,
+			})
+			return dec, nil
+		} else if err != nil {
+			c.observe(ctx, CheckEvent{
+				Request: req,
+				Err:     err,
+			})
+			// fall through to remote on local-eval error
+		}
+	}
 	if c.cache != nil {
 		if dec, ok := c.cache.Get(ctx, cacheKey(req)); ok {
 			c.observe(ctx, CheckEvent{

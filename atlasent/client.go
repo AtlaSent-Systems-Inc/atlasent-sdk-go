@@ -1,9 +1,3 @@
-// Package atlasent is the Go SDK for AtlaSent execution-time authorization.
-//
-// An AtlaSent Client is a Policy Decision Point (PDP) client: your application
-// asks the client whether a principal is allowed to perform an action on a
-// resource, right before the action is executed. The client returns a Decision
-// that your code either enforces (Guard, HTTPMiddleware) or inspects directly.
 package atlasent
 
 import (
@@ -47,6 +41,7 @@ type Client struct {
 	observer        Observer
 	breaker         *breaker
 	enricher        ContextEnricher
+	local           LocalEvaluator
 }
 
 // Option configures a Client.

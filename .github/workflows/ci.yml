@@ -21,6 +21,7 @@ jobs:
           - "connectrpc"
           - "otel"
           - "cacheredis"
+          - "bundle"
           - "middleware/gin"
           - "middleware/echo"
           - "middleware/fiber"
@@ -58,7 +59,7 @@ jobs:
         run: staticcheck ./...
       - name: staticcheck submodules
         run: |
-          for m in grpc connectrpc otel cacheredis middleware/gin middleware/echo middleware/fiber; do
+          for m in grpc connectrpc otel cacheredis bundle middleware/gin middleware/echo middleware/fiber; do
             echo "==> $m"
             (cd "$m" && staticcheck ./...)
           done
@@ -76,7 +77,7 @@ jobs:
         run: govulncheck ./...
       - name: govulncheck submodules
         run: |
-          for m in grpc connectrpc otel cacheredis middleware/gin middleware/echo middleware/fiber; do
+          for m in grpc connectrpc otel cacheredis bundle middleware/gin middleware/echo middleware/fiber; do
             echo "==> $m"
             (cd "$m" && govulncheck ./...)
           done

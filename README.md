@@ -18,8 +18,9 @@ Optional submodules:
 ```sh
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/grpc            # gRPC server interceptors
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/connectrpc      # connectrpc.com/connect interceptor
-go get github.com/atlasent-systems-inc/atlasent-sdk-go/otel            # OpenTelemetry metrics + spans
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/otel            # OpenTelemetry metrics + spans + trace-ID enricher
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/cacheredis      # Redis-backed decision cache
+go get github.com/atlasent-systems-inc/atlasent-sdk-go/bundle          # hybrid-mode: signed local bundles + fall-through
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/gin
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/echo
 go get github.com/atlasent-systems-inc/atlasent-sdk-go/middleware/fiber
@@ -145,6 +146,28 @@ client, _ := atlasent.New(apiKey, atlasent.WithCircuitBreaker(atlasent.BreakerCo
 After N consecutive failures the breaker opens; `Check` fails fast for
 the cool-down period, then lets one probe through. `OnStateChange`
 fires on every transition.
+
+### Hybrid mode (local bundles)
+
+For single-digit-µs Checks on the hot path, pull signed policy bundles
+from the PDP and evaluate locally:
+
+```go
+import "github.com/atlasent-systems-inc/atlasent-sdk-go/bundle"
+
+sync, _ := bundle.NewHTTPSyncer(bundle.HTTPSyncerConfig{
+    URL:       "https://api.atlasent.io/v1/bundles/prod",
+    APIKey:    apiKey,
+    PublicKey: verifyKey, // Ed25519
+})
+mgr, _ := bundle.NewManager(sync, myPolicyEngine)
+defer mgr.Close()
+
+client, _ := atlasent.New(apiKey, atlasent.WithLocalEvaluator(mgr))
+```
+
+`PolicyEngine` is pluggable (Cedar, Rego, CEL). When the engine returns
+"no opinion" the Client falls through to the remote PDP automatically.
 
 ### Request ID propagation
 

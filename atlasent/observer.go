@@ -28,8 +28,11 @@ type CheckEvent struct {
 	Latency time.Duration
 	// CacheHit is true when the decision came from the local cache.
 	CacheHit bool
+	// LocalHit is true when the decision came from a LocalEvaluator
+	// (hybrid-mode bundle) without touching the remote PDP.
+	LocalHit bool
 	// Attempts is the number of HTTP attempts made (1 on success-first-try,
-	// 0 on cache hit).
+	// 0 on cache or local hit).
 	Attempts int
 }
 
