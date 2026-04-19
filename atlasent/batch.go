@@ -32,6 +32,14 @@ func (c *Client) CheckMany(ctx context.Context, reqs []CheckRequest) ([]Decision
 		return out, nil
 	}
 
+	if c.enricher != nil {
+		enriched := make([]CheckRequest, len(reqs))
+		for i, r := range reqs {
+			enriched[i] = c.applyEnricher(ctx, r)
+		}
+		reqs = enriched
+	}
+
 	pending := make([]int, 0, len(reqs))
 	pendingReqs := make([]CheckRequest, 0, len(reqs))
 

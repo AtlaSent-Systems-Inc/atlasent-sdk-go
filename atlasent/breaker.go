@@ -35,6 +35,12 @@ type BreakerConfig struct {
 	// CoolDown is how long the breaker stays open before attempting a
 	// probe in half-open.
 	CoolDown time.Duration
+	// OnStateChange, if non-nil, is invoked whenever the breaker
+	// transitions (closed → open, open → half-open, half-open →
+	// closed, half-open → open). Implementations must return quickly
+	// and be safe for concurrent use; they run on the caller goroutine.
+	// Use this to emit metrics or pages when the PDP flaps.
+	OnStateChange func(from, to BreakerState)
 	// now is injectable for tests.
 	now func() time.Time
 }
@@ -75,7 +81,7 @@ func (b *breaker) allow() bool {
 		return true
 	case BreakerOpen:
 		if b.cfg.now().Sub(b.openedAt) >= b.cfg.CoolDown {
-			b.state = BreakerHalfOpen
+			b.transitionLocked(BreakerHalfOpen)
 			b.probeInFlight.Store(false)
 			return b.claimProbeLocked()
 		}
@@ -84,6 +90,22 @@ func (b *breaker) allow() bool {
 		return b.claimProbeLocked()
 	}
 	return true
+}
+
+// transitionLocked sets state to next and fires OnStateChange. Caller
+// holds mu. The callback runs with mu held; keep it fast.
+func (b *breaker) transitionLocked(next BreakerState) {
+	if b.state == next {
+		return
+	}
+	prev := b.state
+	b.state = next
+	if b.cfg.OnStateChange != nil {
+		func() {
+			defer func() { _ = recover() }()
+			b.cfg.OnStateChange(prev, next)
+		}()
+	}
 }
 
 // claimProbeLocked returns true if this goroutine gets to send the probe;
@@ -99,7 +121,7 @@ func (b *breaker) onSuccess() {
 	}
 	b.mu.Lock()
 	b.failures = 0
-	b.state = BreakerClosed
+	b.transitionLocked(BreakerClosed)
 	b.probeInFlight.Store(false)
 	b.mu.Unlock()
 }
@@ -113,14 +135,14 @@ func (b *breaker) onFailure() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.state == BreakerHalfOpen {
-		b.state = BreakerOpen
+		b.transitionLocked(BreakerOpen)
 		b.openedAt = b.cfg.now()
 		b.probeInFlight.Store(false)
 		return
 	}
 	b.failures++
 	if b.failures >= b.cfg.FailureThreshold {
-		b.state = BreakerOpen
+		b.transitionLocked(BreakerOpen)
 		b.openedAt = b.cfg.now()
 	}
 }

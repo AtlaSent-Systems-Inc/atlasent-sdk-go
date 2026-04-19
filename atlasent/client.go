@@ -46,6 +46,7 @@ type Client struct {
 	cacheDefaultTTL time.Duration
 	observer        Observer
 	breaker         *breaker
+	enricher        ContextEnricher
 }
 
 // Option configures a Client.

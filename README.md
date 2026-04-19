@@ -133,11 +133,32 @@ if decision.Allowed {
 Avoid dog-piling on a known-down PDP:
 
 ```go
-client, _ := atlasent.New(apiKey, atlasent.WithCircuitBreaker(atlasent.DefaultBreakerConfig))
+client, _ := atlasent.New(apiKey, atlasent.WithCircuitBreaker(atlasent.BreakerConfig{
+    FailureThreshold: 5,
+    CoolDown:         30 * time.Second,
+    OnStateChange: func(from, to atlasent.BreakerState) {
+        log.Printf("pdp breaker %v -> %v", from, to)
+    },
+}))
 ```
 
 After N consecutive failures the breaker opens; `Check` fails fast for
-the cool-down period, then lets one probe through.
+the cool-down period, then lets one probe through. `OnStateChange`
+fires on every transition.
+
+### Request ID propagation
+
+```go
+client, _ := atlasent.New(apiKey,
+    atlasent.WithContextEnricher(atlasent.RequestIDEnricher()))
+
+// In your HTTP middleware:
+ctx := atlasent.WithRequestID(r.Context(), r.Header.Get("X-Request-Id"))
+```
+
+Every `Check` now carries `request_id` in `CheckRequest.Context` so
+audit logs correlate without each call-site wiring it manually. Compose
+multiple enrichers with `atlasent.ChainEnrichers(...)`.
 
 ### Async observer
 

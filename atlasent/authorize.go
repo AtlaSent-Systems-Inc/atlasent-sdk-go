@@ -113,6 +113,7 @@ func (c *Client) Check(ctx context.Context, req CheckRequest) (Decision, error) 
 	if err := req.Validate(); err != nil {
 		return Decision{Allowed: false, Reason: "invalid request"}, err
 	}
+	req = c.applyEnricher(ctx, req)
 	if c.cache != nil {
 		if dec, ok := c.cache.Get(ctx, cacheKey(req)); ok {
 			c.observe(ctx, CheckEvent{
